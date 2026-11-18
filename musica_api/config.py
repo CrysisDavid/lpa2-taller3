@@ -1,10 +1,7 @@
-"""
-Configuración de la aplicación.
-Maneja diferentes entornos: desarrollo, pruebas y producción.
-"""
+"""Configuración de la aplicación."""
 
+from pydantic import ConfigDict
 from pydantic_settings import BaseSettings
-from typing import Literal
 
 
 class Settings(BaseSettings):
@@ -43,13 +40,11 @@ class Settings(BaseSettings):
     # TODO: Configuración de logging
     # log_level: str = "INFO"
     
-    class Config:
-        """
-        Configuración de Pydantic Settings.
-        """
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-        case_sensitive = False
+    model_config = ConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+    )
         
         # TODO: Opcional - Agregar validación personalizada
         # @validator("database_url")
