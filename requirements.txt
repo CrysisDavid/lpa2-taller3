@@ -13,6 +13,9 @@ python-multipart
 python-dotenv
 email-validator
 
+# Autenticación (JWT)
+pyjwt
+
 # Testing
 pytest
 pytest-asyncio

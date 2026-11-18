@@ -4,13 +4,17 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.database import create_db_and_tables
-from app.routers import canciones_router, favoritos_router, peliculas_router, usuarios_router
+from app.routers import auth_router, canciones_router, favoritos_router, peliculas_router, usuarios_router
 from musica_api.config import settings
+
+CLAVE_DESARROLLO = "clave-de-desarrollo-cambiar-en-produccion"
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Crea tablas al iniciar y limpia al terminar."""
+    if settings.environment.lower() == "production" and settings.secret_key == CLAVE_DESARROLLO:
+        raise RuntimeError("Define SECRET_KEY en el .env antes de ejecutar en producción")
     create_db_and_tables()
     yield
     print("cerrando aplicación...")
@@ -33,6 +37,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(auth_router)
 app.include_router(usuarios_router)
 app.include_router(canciones_router)
 app.include_router(peliculas_router)
@@ -46,6 +51,7 @@ async def root():
         "version": settings.app_version,
         "documentacion": "/docs",
         "redoc": "/redoc",
+        "auth": "/api/auth",
         "usuarios": "/api/usuarios",
         "canciones": "/api/canciones",
         "favoritos": "/api/favoritos",

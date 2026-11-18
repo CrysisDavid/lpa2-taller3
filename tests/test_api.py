@@ -5,9 +5,15 @@ from fastapi.testclient import TestClient
 from sqlmodel import Session, SQLModel, create_engine, select
 from sqlmodel.pool import StaticPool
 
+from app.auth import get_usuario_actual
 from app.database import get_session
 from app.models import Cancion, Favorito, Usuario
 from main import app
+
+
+def override_usuario_actual():
+    """Simula un usuario autenticado: la autenticación se prueba en test_auth.py."""
+    return Usuario(id=0, nombre="Tester", correo="tester@test.com")
 
 
 @pytest.fixture(name="session")
@@ -28,6 +34,7 @@ def client_fixture(session: Session):
         yield session
 
     app.dependency_overrides[get_session] = override_get_session
+    app.dependency_overrides[get_usuario_actual] = override_usuario_actual
     with TestClient(app) as client:
         yield client
     app.dependency_overrides.clear()

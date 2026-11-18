@@ -6,10 +6,12 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
+from app.auth import get_usuario_actual
 from app.database import get_session
 from app.models import Cancion, Favorito, Usuario
 
-router = APIRouter(prefix="/api/usuarios", tags=["Usuarios"])
+# Todas las rutas exigen un token JWT válido (Authorization: Bearer <token>)
+router = APIRouter(prefix="/api/usuarios", tags=["Usuarios"], dependencies=[Depends(get_usuario_actual)])
 
 
 @router.get("")
@@ -20,6 +22,7 @@ def listar_usuarios(session: Session = Depends(get_session)):
 @router.post("", status_code=status.HTTP_201_CREATED)
 def crear_usuario(usuario: Usuario, session: Session = Depends(get_session)):
     usuario.id = None
+    usuario.password_hash = None  # la contraseña solo se define en /api/auth/registro
     usuario.fecha_registro = usuario.fecha_registro or datetime.now(timezone.utc)
     try:
         session.add(usuario)

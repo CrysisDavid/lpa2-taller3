@@ -32,10 +32,12 @@ class Settings(BaseSettings):
     # En desarrollo puedes usar ["*"], en producción especifica los orígenes permitidos
     cors_origins: list[str] = ["*"]
     
-    # TODO: Configuración de seguridad (para futuras mejoras)
-    # secret_key: str = "your-secret-key-here"  # Cambiar en producción
-    # algorithm: str = "HS256"
-    # access_token_expire_minutes: int = 30
+    # Configuración de seguridad (JWT)
+    # En producción define SECRET_KEY en el .env, por ejemplo con:
+    #   python -c "import secrets; print(secrets.token_urlsafe(48))"
+    secret_key: str = "clave-de-desarrollo-cambiar-en-produccion"
+    algorithm: str = "HS256"
+    access_token_expire_minutes: int = 60
     
     # TODO: Configuración de logging
     # log_level: str = "INFO"

@@ -43,6 +43,9 @@ class Usuario(SQLModel, table=True):
     nombre: str = Field(index=True)
     correo: str = Field(index=True, unique=True)
     fecha_registro: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    # Hash PBKDF2 de la contraseña. exclude=True: nunca se serializa en las respuestas
+    # ni entra en model_dump() (por eso un PUT no puede modificarlo).
+    password_hash: Optional[str] = Field(default=None, exclude=True)
 
     favoritos: list["Favorito"] = Relationship(back_populates="usuario")
 

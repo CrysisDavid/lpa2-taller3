@@ -6,10 +6,12 @@ from datetime import datetime, timezone
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
+from app.auth import get_usuario_actual
 from app.database import get_session
 from app.models import Cancion
 
-router = APIRouter(prefix="/api/canciones", tags=["Canciones"])
+# Todas las rutas exigen un token JWT válido (Authorization: Bearer <token>)
+router = APIRouter(prefix="/api/canciones", tags=["Canciones"], dependencies=[Depends(get_usuario_actual)])
 
 
 @router.get("")
