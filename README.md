@@ -105,13 +105,45 @@ Notas:
 - En *Swagger UI* (`/docs`) usa el botón **Authorize** y pega el `access_token`.
 - El token expira a los 60 minutos (`ACCESS_TOKEN_EXPIRE_MINUTES`).
 - En producción define `SECRET_KEY` en el `.env`; con la clave de desarrollo la API no arranca si `ENVIRONMENT=production`. Para generar una: `python -c "import secrets; print(secrets.token_urlsafe(48))"`.
-- Las contraseñas se guardan con hash PBKDF2-SHA256 y nunca se devuelven en las respuestas. Los usuarios creados con `POST /api/usuarios` (o directamente en la base de datos) no tienen contraseña y no pueden iniciar sesión.
-- Al arrancar, la API agrega la columna `password_hash` a una base de datos existente.
+- Las contraseñas se guardan con hash PBKDF2-SHA256 y nunca se devuelven en las respuestas. Los usuarios creados directamente en la base de datos no tienen contraseña y no pueden iniciar sesión.
+- Un token emitido antes de la fecha de registro del usuario se rechaza: SQLite reutiliza los `id` de usuarios borrados y, sin esta comprobación, un token antiguo daría acceso a la cuenta nueva.
+- Al arrancar, la API agrega las columnas `password_hash` y `es_admin` a una base de datos existente.
+
+### Cuenta de administrador
+
+Al arrancar, la API crea automáticamente esta cuenta si no existe:
+
+| Campo | Valor |
+|---|---|
+| Nombre | `admin` |
+| Correo (para iniciar sesión) | `admin@musica.com` |
+| Contraseña | `admin@2026.musica` |
+
+- Se inicia sesión con el **correo** y la contraseña, en el frontend o en `POST /api/auth/login`.
+- Se puede cambiar con `ADMIN_NOMBRE`, `ADMIN_CORREO` y `ADMIN_PASSWORD` en el `.env`. La contraseña solo se aplica al crear la cuenta (o si la cuenta existía sin contraseña): no sobrescribe una contraseña existente.
+- **En producción cambia `ADMIN_PASSWORD`**: con la contraseña por defecto la API no arranca si `ENVIRONMENT=production`.
+- El rol de administrador (`es_admin`) solo lo asigna el servidor: ni el registro ni `PUT /api/usuarios/{id}` lo aceptan.
+
+### Permisos
+
+Cada usuario solo puede leer y modificar sus propios datos; el administrador puede gestionar los de todos:
+
+| Recurso | Usuario | Administrador |
+|---|---|---|
+| `GET /api/usuarios` | Solo a sí mismo. | Todos los usuarios. |
+| `GET/PUT /api/usuarios/{id}` | Solo el propio `id`; otro `id` responde `403` (exista o no). | Cualquier usuario. |
+| `DELETE /api/usuarios/{id}` | Solo su propia cuenta (se eliminan también sus favoritos). | Cualquier usuario y sus favoritos, excepto la cuenta de administrador (`400`). |
+| `POST /api/usuarios` | Deshabilitado (`403`): las cuentas se crean con `POST /api/auth/registro`. | Igual. |
+| `/api/usuarios/{id}/favoritos...` | Solo el propio `id`; si no, `403`. | Los de cualquier usuario. |
+| `GET /api/favoritos` | Solo los propios. | Los de todos. |
+| `POST /api/favoritos` | `id_usuario` debe ser el propio; si no, `403`. | Para cualquier usuario existente. |
+| `GET/DELETE /api/favoritos/{id}` | Uno de otro usuario responde `404`, como si no existiera. | Cualquiera. |
+| `/api/canciones` | Catálogo compartido: leer y modificar. | Igual. |
 
 ### Usuarios
 
-- **Listar usuarios**: `GET /api/usuarios`
-- **Crear usuario**: `POST /api/usuarios`
+- **Listar usuarios**: `GET /api/usuarios` (solo el propio; el administrador ve a todos)
+- **Crear usuario**: `POST /api/usuarios` (deshabilitado, usar `POST /api/auth/registro`)
 - **Obtener usuario**: `GET /api/usuarios/{id}`
 - **Actualizar usuario**: `PUT /api/usuarios/{id}`
 - **Eliminar usuario**: `DELETE /api/usuarios/{id}`

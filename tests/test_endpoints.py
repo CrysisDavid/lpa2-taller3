@@ -1,60 +1,29 @@
 """Pruebas detalladas de todos los endpoints de la API de Música.
 
 Cada endpoint se prueba en su camino feliz, en sus errores esperados
-(404, 400, 422) y en casos límite. Los tests marcados con ``xfail(strict=True)``
+(403, 404, 400, 422) y en casos límite. Los tests marcados con ``xfail(strict=True)``
 documentan bugs conocidos: fallan hoy y, cuando el bug se corrija, pasarán
 a XPASS y pytest avisará para quitar la marca.
+
+Las fixtures ``session``, ``client`` y ``como`` están en conftest.py: ``como(usuario)``
+hace que las peticiones siguientes se autentiquen como ese usuario.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlmodel import Session, SQLModel, create_engine, select
-from sqlmodel.pool import StaticPool
+from sqlmodel import Session, select
 
-from app.auth import get_usuario_actual
-from app.database import get_session
-from app.models import Cancion, Favorito, Usuario
-from main import app
+from app.models import Favorito, Usuario
+from tests.conftest import registrar
 
 ANIO_ACTUAL = datetime.now(timezone.utc).year
-
-
-def override_usuario_actual():
-    """Simula un usuario autenticado: la autenticación se prueba en test_auth.py."""
-    return Usuario(id=0, nombre="Tester", correo="tester@test.com")
 
 
 # =============================================================================
 # FIXTURES
 # =============================================================================
-
-
-@pytest.fixture(name="session")
-def session_fixture():
-    engine = create_engine(
-        "sqlite://",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    SQLModel.metadata.create_all(engine)
-    with Session(engine) as session:
-        yield session
-
-
-@pytest.fixture(name="client")
-def client_fixture(session: Session):
-    def override_get_session():
-        yield session
-
-    app.dependency_overrides[get_session] = override_get_session
-    app.dependency_overrides[get_usuario_actual] = override_usuario_actual
-    # raise_server_exceptions=False: un error 500 se devuelve como respuesta
-    # en lugar de propagarse, para poder afirmar sobre el código de estado.
-    with TestClient(app, raise_server_exceptions=False) as client:
-        yield client
-    app.dependency_overrides.clear()
 
 
 def cancion_payload(**overrides):
@@ -70,18 +39,20 @@ def cancion_payload(**overrides):
     return payload
 
 
+
+
 @pytest.fixture(name="usuario")
-def usuario_fixture(client: TestClient):
-    r = client.post("/api/usuarios", json={"nombre": "Ana García", "correo": "ana@test.com"})
-    assert r.status_code == 201
-    return r.json()
+def usuario_fixture(client: TestClient, como):
+    """Ana: usuario registrado y autenticado en la prueba."""
+    ana = registrar(client, "Ana García", "ana@test.com")
+    como(ana)
+    return ana
 
 
 @pytest.fixture(name="otro_usuario")
 def otro_usuario_fixture(client: TestClient):
-    r = client.post("/api/usuarios", json={"nombre": "Luis Pérez", "correo": "luis@test.com"})
-    assert r.status_code == 201
-    return r.json()
+    """Luis: otro usuario registrado (no autenticado salvo que se use ``como``)."""
+    return registrar(client, "Luis Pérez", "luis@test.com")
 
 
 @pytest.fixture(name="cancion")
@@ -181,26 +152,44 @@ class TestRootYHealth:
 
 
 class TestListarUsuarios:
-    def test_lista_vacia(self, client: TestClient):
+    def test_solo_devuelve_al_usuario_actual(self, client: TestClient, usuario, otro_usuario):
         r = client.get("/api/usuarios")
         assert r.status_code == 200
-        assert r.json() == []
+        data = r.json()
+        assert len(data) == 1
+        assert data[0]["correo"] == "ana@test.com"
 
-    def test_lista_con_usuarios(self, client: TestClient, usuario, otro_usuario):
-        data = client.get("/api/usuarios").json()
-        assert len(data) == 2
-        assert {u["correo"] for u in data} == {"ana@test.com", "luis@test.com"}
+    def test_cada_usuario_se_ve_solo_a_si_mismo(self, client: TestClient, usuario, otro_usuario, como):
+        como(otro_usuario)
+        assert [u["correo"] for u in client.get("/api/usuarios").json()] == ["luis@test.com"]
 
     def test_estructura_de_cada_usuario(self, client: TestClient, usuario):
         item = client.get("/api/usuarios").json()[0]
-        assert set(item) == {"id", "nombre", "correo", "fecha_registro"}
+        assert set(item) == {"id", "nombre", "correo", "fecha_registro", "es_admin"}
 
 
 class TestCrearUsuario:
-    def test_crear_usuario(self, client: TestClient):
+    """POST /api/usuarios está deshabilitado: cada cuenta se crea con /api/auth/registro."""
+
+    def test_post_prohibido_403(self, client: TestClient, usuario):
         r = client.post("/api/usuarios", json={"nombre": "Carlos", "correo": "carlos@test.com"})
+        assert r.status_code == 403
+        assert "/api/auth/registro" in r.json()["detail"]
+
+    def test_post_no_crea_nada(self, client: TestClient, session: Session, usuario):
+        client.post("/api/usuarios", json={"nombre": "Carlos", "correo": "carlos@test.com"})
+        assert len(session.exec(select(Usuario)).all()) == 1
+
+
+def registro(**cambios):
+    return {"nombre": "Carlos", "correo": "carlos@test.com", "password": "secreta123", **cambios}
+
+
+class TestRegistroUsuario:
+    def test_crear_usuario(self, client: TestClient):
+        r = client.post("/api/auth/registro", json=registro())
         assert r.status_code == 201
-        data = r.json()
+        data = r.json()["usuario"]
         assert isinstance(data["id"], int)
         assert data["nombre"] == "Carlos"
         assert data["correo"] == "carlos@test.com"
@@ -208,33 +197,31 @@ class TestCrearUsuario:
         datetime.fromisoformat(data["fecha_registro"].replace("Z", "+00:00"))
 
     def test_crear_usuario_persiste(self, client: TestClient, session: Session):
-        r = client.post("/api/usuarios", json={"nombre": "Carlos", "correo": "carlos@test.com"})
-        en_db = session.get(Usuario, r.json()["id"])
+        r = client.post("/api/auth/registro", json=registro())
+        en_db = session.get(Usuario, r.json()["usuario"]["id"])
         assert en_db is not None
         assert en_db.correo == "carlos@test.com"
 
     def test_ids_autoincrementales(self, client: TestClient):
-        a = client.post("/api/usuarios", json={"nombre": "A", "correo": "a@test.com"}).json()
-        b = client.post("/api/usuarios", json={"nombre": "B", "correo": "b@test.com"}).json()
+        a = registrar(client, "A", "a@test.com")
+        b = registrar(client, "B", "b@test.com")
         assert b["id"] > a["id"]
 
     def test_id_enviado_se_ignora(self, client: TestClient):
-        r = client.post("/api/usuarios", json={"id": 999, "nombre": "X", "correo": "x@test.com"})
+        r = client.post("/api/auth/registro", json=registro(id=999))
         assert r.status_code == 201
-        assert r.json()["id"] != 999
+        assert r.json()["usuario"]["id"] != 999
 
-    @pytest.mark.parametrize("fecha", ["2024-01-15T10:30:00Z", "2024-01-15T10:30:00+00:00", "2024-01-15T10:30:00"])
-    def test_crear_con_fecha_iso(self, client: TestClient, fecha):
-        r = client.post("/api/usuarios", json={"nombre": "F", "correo": "f@test.com", "fecha_registro": fecha})
+    def test_fecha_registro_enviada_se_ignora(self, client: TestClient):
+        r = client.post("/api/auth/registro", json=registro(fecha_registro="2024-01-15T10:30:00Z"))
         assert r.status_code == 201
-        assert r.json()["fecha_registro"].startswith("2024-01-15T10:30:00")
-
-    def test_fecha_invalida_422(self, client: TestClient):
-        r = client.post("/api/usuarios", json={"nombre": "F", "correo": "f@test.com", "fecha_registro": "ayer"})
-        assert r.status_code == 422
+        fecha = datetime.fromisoformat(r.json()["usuario"]["fecha_registro"].replace("Z", "+00:00"))
+        if fecha.tzinfo is None:
+            fecha = fecha.replace(tzinfo=timezone.utc)
+        assert datetime.now(timezone.utc) - fecha < timedelta(minutes=1)
 
     def test_correo_duplicado_400(self, client: TestClient, usuario):
-        r = client.post("/api/usuarios", json={"nombre": "Otra Ana", "correo": usuario["correo"]})
+        r = client.post("/api/auth/registro", json=registro(correo=usuario["correo"]))
         assert r.status_code == 400
         assert r.json()["detail"] == "Ya existe un usuario con ese correo"
 
@@ -243,51 +230,36 @@ class TestCrearUsuario:
         ["sin-arroba", "a@b", "@test.com", "a@.com", "a b@test.com", "a@test.c", ""],
     )
     def test_correo_invalido_422(self, client: TestClient, correo):
-        r = client.post("/api/usuarios", json={"nombre": "X", "correo": correo})
-        assert r.status_code == 422
+        assert client.post("/api/auth/registro", json=registro(correo=correo)).status_code == 422
 
     @pytest.mark.parametrize("correo", ["a.b@test.com", "a+tag@sub.test.co", "A_B-1%x@dominio.org"])
     def test_correo_valido_variantes(self, client: TestClient, correo):
-        r = client.post("/api/usuarios", json={"nombre": "X", "correo": correo})
-        assert r.status_code == 201
+        assert client.post("/api/auth/registro", json=registro(correo=correo)).status_code == 201
 
     @pytest.mark.parametrize("nombre", ["", "   "])
     def test_nombre_vacio_422(self, client: TestClient, nombre):
-        r = client.post("/api/usuarios", json={"nombre": nombre, "correo": "x@test.com"})
-        assert r.status_code == 422
+        assert client.post("/api/auth/registro", json=registro(nombre=nombre)).status_code == 422
 
     def test_nombre_con_acentos_y_unicode(self, client: TestClient):
-        r = client.post("/api/usuarios", json={"nombre": "José Ñúñez 🎵", "correo": "jose@test.com"})
+        r = client.post("/api/auth/registro", json=registro(nombre="José Ñúñez 🎵"))
         assert r.status_code == 201
-        assert r.json()["nombre"] == "José Ñúñez 🎵"
+        assert r.json()["usuario"]["nombre"] == "José Ñúñez 🎵"
 
     def test_body_no_json_422(self, client: TestClient):
-        r = client.post("/api/usuarios", content="no es json", headers={"Content-Type": "application/json"})
+        r = client.post("/api/auth/registro", content="no es json", headers={"Content-Type": "application/json"})
         assert r.status_code == 422
 
-    @pytest.mark.xfail(strict=True, reason="BUG: tipos no validados en modelos table=True; una lista como nombre provoca 500")
     def test_tipo_incorrecto_422(self, client: TestClient):
-        r = client.post("/api/usuarios", json={"nombre": ["lista"], "correo": "x@test.com"})
-        assert r.status_code == 422
+        assert client.post("/api/auth/registro", json=registro(nombre=["lista"])).status_code == 422
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="BUG: Usuario es un modelo table=True; los campos requeridos no se validan "
-        "y sin correo se responde 400 'Ya existe un usuario con ese correo'",
-    )
-    def test_falta_correo_422(self, client: TestClient):
-        r = client.post("/api/usuarios", json={"nombre": "Sin correo"})
-        assert r.status_code == 422
+    @pytest.mark.parametrize("falta", ["nombre", "correo", "password"])
+    def test_campo_requerido_422(self, client: TestClient, falta):
+        body = registro()
+        del body[falta]
+        assert client.post("/api/auth/registro", json=body).status_code == 422
 
-    @pytest.mark.xfail(strict=True, reason="BUG: campos requeridos no validados en modelos table=True")
-    def test_falta_nombre_422(self, client: TestClient):
-        r = client.post("/api/usuarios", json={"correo": "x@test.com"})
-        assert r.status_code == 422
-
-    @pytest.mark.xfail(strict=True, reason="BUG: campos requeridos no validados en modelos table=True")
     def test_body_vacio_422(self, client: TestClient):
-        r = client.post("/api/usuarios", json={})
-        assert r.status_code == 422
+        assert client.post("/api/auth/registro", json={}).status_code == 422
 
 
 class TestObtenerUsuario:
@@ -296,18 +268,22 @@ class TestObtenerUsuario:
         assert r.status_code == 200
         assert r.json() == usuario
 
-    def test_no_existe_404(self, client: TestClient):
-        r = client.get("/api/usuarios/999")
-        assert r.status_code == 404
-        assert r.json()["detail"] == "Usuario no encontrado"
+    def test_otro_usuario_403(self, client: TestClient, usuario, otro_usuario):
+        r = client.get(f"/api/usuarios/{otro_usuario['id']}")
+        assert r.status_code == 403
+        assert r.json()["detail"] == "No tienes permiso para acceder a los datos de otro usuario"
+
+    def test_inexistente_403(self, client: TestClient, usuario):
+        # Un id ajeno da 403 exista o no: no se revela qué usuarios existen.
+        assert client.get("/api/usuarios/999").status_code == 403
 
     @pytest.mark.parametrize("usuario_id", ["abc", "1.5"])
-    def test_id_no_entero_422(self, client: TestClient, usuario_id):
+    def test_id_no_entero_422(self, client: TestClient, usuario, usuario_id):
         assert client.get(f"/api/usuarios/{usuario_id}").status_code == 422
 
     @pytest.mark.parametrize("usuario_id", [0, -1])
-    def test_id_no_positivo_404(self, client: TestClient, usuario_id):
-        assert client.get(f"/api/usuarios/{usuario_id}").status_code == 404
+    def test_id_no_positivo_403(self, client: TestClient, usuario, usuario_id):
+        assert client.get(f"/api/usuarios/{usuario_id}").status_code == 403
 
 
 class TestActualizarUsuario:
@@ -333,6 +309,12 @@ class TestActualizarUsuario:
         assert r.status_code == 200
         assert r.json()["id"] == usuario["id"]
 
+    def test_password_hash_en_body_se_ignora(self, client: TestClient, session: Session, usuario):
+        antes = session.get(Usuario, usuario["id"]).password_hash
+        r = client.put(f"/api/usuarios/{usuario['id']}", json={"password_hash": "pbkdf2_sha256$1$a$b"})
+        assert r.status_code == 200
+        assert session.get(Usuario, usuario["id"]).password_hash == antes
+
     def test_mismo_correo_propio_permitido(self, client: TestClient, usuario):
         r = client.put(f"/api/usuarios/{usuario['id']}", json={"nombre": "Ana", "correo": usuario["correo"]})
         assert r.status_code == 200
@@ -351,43 +333,59 @@ class TestActualizarUsuario:
         r = client.put(f"/api/usuarios/{usuario['id']}", json={"nombre": "  "})
         assert r.status_code == 422
 
-    def test_no_existe_404(self, client: TestClient):
+    def test_otro_usuario_403_y_no_cambia(self, client: TestClient, usuario, otro_usuario, como):
+        r = client.put(f"/api/usuarios/{otro_usuario['id']}", json={"nombre": "Hackeado"})
+        assert r.status_code == 403
+        como(otro_usuario)
+        assert client.get(f"/api/usuarios/{otro_usuario['id']}").json()["nombre"] == "Luis Pérez"
+
+    def test_inexistente_403(self, client: TestClient, usuario):
         r = client.put("/api/usuarios/999", json={"nombre": "X", "correo": "x@test.com"})
-        assert r.status_code == 404
+        assert r.status_code == 403
 
 
 class TestEliminarUsuario:
-    def test_eliminar(self, client: TestClient, usuario):
+    def test_eliminar(self, client: TestClient, session: Session, usuario):
         r = client.delete(f"/api/usuarios/{usuario['id']}")
         assert r.status_code == 204
         assert r.content == b""
-        assert client.get(f"/api/usuarios/{usuario['id']}").status_code == 404
+        assert session.get(Usuario, usuario["id"]) is None
+        # la sesión del usuario borrado deja de ser válida
+        assert client.get(f"/api/usuarios/{usuario['id']}").status_code == 401
 
-    def test_eliminar_dos_veces_404(self, client: TestClient, usuario):
+    def test_eliminar_dos_veces_401(self, client: TestClient, usuario):
         client.delete(f"/api/usuarios/{usuario['id']}")
-        assert client.delete(f"/api/usuarios/{usuario['id']}").status_code == 404
+        assert client.delete(f"/api/usuarios/{usuario['id']}").status_code == 401
 
-    def test_no_existe_404(self, client: TestClient):
-        assert client.delete("/api/usuarios/999").status_code == 404
+    def test_otro_usuario_403_y_no_se_borra(self, client: TestClient, session: Session, usuario, otro_usuario):
+        assert client.delete(f"/api/usuarios/{otro_usuario['id']}").status_code == 403
+        assert session.get(Usuario, otro_usuario["id"]) is not None
 
-    def test_no_afecta_a_otros(self, client: TestClient, usuario, otro_usuario):
+    def test_inexistente_403(self, client: TestClient, usuario):
+        assert client.delete("/api/usuarios/999").status_code == 403
+
+    def test_no_afecta_a_otros(self, client: TestClient, usuario, otro_usuario, como):
         client.delete(f"/api/usuarios/{usuario['id']}")
+        como(otro_usuario)
         assert client.get(f"/api/usuarios/{otro_usuario['id']}").status_code == 200
 
     def test_correo_reutilizable_tras_eliminar(self, client: TestClient, usuario):
         client.delete(f"/api/usuarios/{usuario['id']}")
-        r = client.post("/api/usuarios", json={"nombre": "Ana otra vez", "correo": usuario["correo"]})
+        r = client.post("/api/auth/registro", json=registro(correo=usuario["correo"]))
         assert r.status_code == 201
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="BUG: al borrar un usuario con favoritos, SQLAlchemy pone id_usuario=NULL en "
-        "sus favoritos, viola NOT NULL y la API responde 500",
-    )
-    def test_eliminar_usuario_con_favoritos(self, client: TestClient, usuario, cancion):
+    def test_eliminar_usuario_con_favoritos(
+        self, client: TestClient, session: Session, usuario, otro_usuario, cancion, como
+    ):
         client.post(f"/api/usuarios/{usuario['id']}/favoritos/{cancion['id']}")
+        como(otro_usuario)
+        client.post(f"/api/usuarios/{otro_usuario['id']}/favoritos/{cancion['id']}")
+        como(usuario)
         r = client.delete(f"/api/usuarios/{usuario['id']}")
-        assert r.status_code in (204, 400, 409)
+        assert r.status_code == 204
+        # se borran sus favoritos, pero no los de otros usuarios
+        restantes = session.exec(select(Favorito)).all()
+        assert [f.id_usuario for f in restantes] == [otro_usuario["id"]]
 
 
 # =============================================================================
@@ -625,23 +623,30 @@ class TestEliminarCancion:
 # =============================================================================
 
 
+def marcar(client: TestClient, usuario: dict, cancion: dict):
+    return client.post("/api/favoritos", json={"id_usuario": usuario["id"], "id_cancion": cancion["id"]})
+
+
 class TestListarFavoritos:
-    def test_lista_vacia(self, client: TestClient):
+    def test_lista_vacia(self, client: TestClient, usuario):
         r = client.get("/api/favoritos")
         assert r.status_code == 200
         assert r.json() == []
 
-    def test_lista_todos_los_usuarios(self, client: TestClient, usuario, otro_usuario, cancion):
-        client.post("/api/favoritos", json={"id_usuario": usuario["id"], "id_cancion": cancion["id"]})
-        client.post("/api/favoritos", json={"id_usuario": otro_usuario["id"], "id_cancion": cancion["id"]})
+    def test_solo_los_del_usuario_actual(self, client: TestClient, usuario, otro_usuario, cancion, como):
+        marcar(client, usuario, cancion)
+        como(otro_usuario)
+        marcar(client, otro_usuario, cancion)
+        como(usuario)
         data = client.get("/api/favoritos").json()
-        assert len(data) == 2
+        assert len(data) == 1
+        assert data[0]["id_usuario"] == usuario["id"]
         assert set(data[0]) == {"id", "id_usuario", "id_cancion", "fecha_marcado"}
 
 
 class TestCrearFavorito:
     def test_crear(self, client: TestClient, usuario, cancion):
-        r = client.post("/api/favoritos", json={"id_usuario": usuario["id"], "id_cancion": cancion["id"]})
+        r = marcar(client, usuario, cancion)
         assert r.status_code == 201
         data = r.json()
         assert data["id_usuario"] == usuario["id"]
@@ -650,55 +655,67 @@ class TestCrearFavorito:
         assert "fecha_marcado" in data
 
     def test_duplicado_400(self, client: TestClient, usuario, cancion):
-        body = {"id_usuario": usuario["id"], "id_cancion": cancion["id"]}
-        client.post("/api/favoritos", json=body)
-        r = client.post("/api/favoritos", json=body)
+        marcar(client, usuario, cancion)
+        r = marcar(client, usuario, cancion)
         assert r.status_code == 400
         assert "favorita" in r.json()["detail"]
 
-    def test_misma_cancion_distintos_usuarios(self, client: TestClient, usuario, otro_usuario, cancion):
-        assert client.post("/api/favoritos", json={"id_usuario": usuario["id"], "id_cancion": cancion["id"]}).status_code == 201
-        assert client.post("/api/favoritos", json={"id_usuario": otro_usuario["id"], "id_cancion": cancion["id"]}).status_code == 201
+    def test_misma_cancion_distintos_usuarios(self, client: TestClient, usuario, otro_usuario, cancion, como):
+        assert marcar(client, usuario, cancion).status_code == 201
+        como(otro_usuario)
+        assert marcar(client, otro_usuario, cancion).status_code == 201
 
-    def test_usuario_inexistente_404(self, client: TestClient, cancion):
+    def test_para_otro_usuario_403(self, client: TestClient, session: Session, usuario, otro_usuario, cancion):
+        r = marcar(client, otro_usuario, cancion)
+        assert r.status_code == 403
+        assert session.exec(select(Favorito)).all() == []
+
+    def test_usuario_inexistente_403(self, client: TestClient, usuario, cancion):
         r = client.post("/api/favoritos", json={"id_usuario": 999, "id_cancion": cancion["id"]})
-        assert r.status_code == 404
-        assert r.json()["detail"] == "Usuario no encontrado"
+        assert r.status_code == 403
 
     def test_cancion_inexistente_404(self, client: TestClient, usuario):
         r = client.post("/api/favoritos", json={"id_usuario": usuario["id"], "id_cancion": 999})
         assert r.status_code == 404
         assert r.json()["detail"] == "Canción no encontrada"
 
-    @pytest.mark.xfail(strict=True, reason="BUG: tipos no validados; id_usuario='uno' responde 404 en vez de 422")
-    def test_tipo_incorrecto_422(self, client: TestClient):
+    @pytest.mark.xfail(strict=True, reason="BUG: tipos no validados; id_usuario='uno' responde 403 en vez de 422")
+    def test_tipo_incorrecto_422(self, client: TestClient, usuario):
         r = client.post("/api/favoritos", json={"id_usuario": "uno", "id_cancion": 1})
         assert r.status_code == 422
 
-    @pytest.mark.xfail(strict=True, reason="BUG: campos requeridos no validados; responde 404 en vez de 422")
-    def test_body_vacio_422(self, client: TestClient):
+    @pytest.mark.xfail(strict=True, reason="BUG: campos requeridos no validados; responde 403 en vez de 422")
+    def test_body_vacio_422(self, client: TestClient, usuario):
         assert client.post("/api/favoritos", json={}).status_code == 422
 
 
 class TestObtenerFavorito:
     def test_obtener(self, client: TestClient, usuario, cancion):
-        creado = client.post("/api/favoritos", json={"id_usuario": usuario["id"], "id_cancion": cancion["id"]}).json()
+        creado = marcar(client, usuario, cancion).json()
         r = client.get(f"/api/favoritos/{creado['id']}")
         assert r.status_code == 200
         assert r.json() == creado
 
-    def test_no_existe_404(self, client: TestClient):
+    def test_no_existe_404(self, client: TestClient, usuario):
         r = client.get("/api/favoritos/999")
         assert r.status_code == 404
         assert r.json()["detail"] == "Favorito no encontrado"
 
-    def test_id_no_entero_422(self, client: TestClient):
+    def test_de_otro_usuario_404(self, client: TestClient, usuario, otro_usuario, cancion, como):
+        # Responde igual que si no existiera: no se revela que el favorito existe.
+        creado = marcar(client, usuario, cancion).json()
+        como(otro_usuario)
+        r = client.get(f"/api/favoritos/{creado['id']}")
+        assert r.status_code == 404
+        assert r.json()["detail"] == "Favorito no encontrado"
+
+    def test_id_no_entero_422(self, client: TestClient, usuario):
         assert client.get("/api/favoritos/x").status_code == 422
 
 
 class TestEliminarFavorito:
     def test_eliminar(self, client: TestClient, usuario, cancion):
-        creado = client.post("/api/favoritos", json={"id_usuario": usuario["id"], "id_cancion": cancion["id"]}).json()
+        creado = marcar(client, usuario, cancion).json()
         r = client.delete(f"/api/favoritos/{creado['id']}")
         assert r.status_code == 204
         assert client.get(f"/api/favoritos/{creado['id']}").status_code == 404
@@ -706,14 +723,21 @@ class TestEliminarFavorito:
         assert client.get(f"/api/usuarios/{usuario['id']}").status_code == 200
         assert client.get(f"/api/canciones/{cancion['id']}").status_code == 200
 
-    def test_no_existe_404(self, client: TestClient):
+    def test_no_existe_404(self, client: TestClient, usuario):
         assert client.delete("/api/favoritos/999").status_code == 404
 
+    def test_de_otro_usuario_404_y_no_se_borra(
+        self, client: TestClient, session: Session, usuario, otro_usuario, cancion, como
+    ):
+        creado = marcar(client, usuario, cancion).json()
+        como(otro_usuario)
+        assert client.delete(f"/api/favoritos/{creado['id']}").status_code == 404
+        assert session.get(Favorito, creado["id"]) is not None
+
     def test_se_puede_volver_a_marcar(self, client: TestClient, usuario, cancion):
-        body = {"id_usuario": usuario["id"], "id_cancion": cancion["id"]}
-        creado = client.post("/api/favoritos", json=body).json()
+        creado = marcar(client, usuario, cancion).json()
         client.delete(f"/api/favoritos/{creado['id']}")
-        assert client.post("/api/favoritos", json=body).status_code == 201
+        assert marcar(client, usuario, cancion).status_code == 201
 
 
 # =============================================================================
@@ -727,18 +751,23 @@ class TestFavoritosDeUsuario:
         assert r.status_code == 200
         assert r.json() == []
 
-    def test_listar_solo_los_del_usuario(self, client: TestClient, usuario, otro_usuario, catalogo):
+    def test_listar_solo_los_del_usuario(self, client: TestClient, usuario, otro_usuario, catalogo, como):
         for c in catalogo[:2]:
             client.post(f"/api/usuarios/{usuario['id']}/favoritos/{c['id']}")
+        como(otro_usuario)
         client.post(f"/api/usuarios/{otro_usuario['id']}/favoritos/{catalogo[3]['id']}")
+        como(usuario)
 
         data = client.get(f"/api/usuarios/{usuario['id']}/favoritos").json()
         assert len(data) == 2
         assert all(f["id_usuario"] == usuario["id"] for f in data)
         assert {f["id_cancion"] for f in data} == {catalogo[0]["id"], catalogo[1]["id"]}
 
-    def test_listar_usuario_inexistente_404(self, client: TestClient):
-        assert client.get("/api/usuarios/999/favoritos").status_code == 404
+    def test_listar_de_otro_usuario_403(self, client: TestClient, usuario, otro_usuario):
+        assert client.get(f"/api/usuarios/{otro_usuario['id']}/favoritos").status_code == 403
+
+    def test_listar_usuario_inexistente_403(self, client: TestClient, usuario):
+        assert client.get("/api/usuarios/999/favoritos").status_code == 403
 
     def test_marcar(self, client: TestClient, usuario, cancion):
         r = client.post(f"/api/usuarios/{usuario['id']}/favoritos/{cancion['id']}")
@@ -756,14 +785,17 @@ class TestFavoritosDeUsuario:
         assert r.json()["detail"] == "La canción ya está marcada como favorita"
 
     def test_marcar_duplicado_entre_endpoints(self, client: TestClient, usuario, cancion):
-        client.post("/api/favoritos", json={"id_usuario": usuario["id"], "id_cancion": cancion["id"]})
+        marcar(client, usuario, cancion)
         r = client.post(f"/api/usuarios/{usuario['id']}/favoritos/{cancion['id']}")
         assert r.status_code == 400
 
-    def test_marcar_usuario_inexistente_404(self, client: TestClient, cancion):
-        r = client.post(f"/api/usuarios/999/favoritos/{cancion['id']}")
-        assert r.status_code == 404
-        assert r.json()["detail"] == "Usuario no encontrado"
+    def test_marcar_para_otro_usuario_403(self, client: TestClient, session: Session, usuario, otro_usuario, cancion):
+        r = client.post(f"/api/usuarios/{otro_usuario['id']}/favoritos/{cancion['id']}")
+        assert r.status_code == 403
+        assert session.exec(select(Favorito)).all() == []
+
+    def test_marcar_usuario_inexistente_403(self, client: TestClient, usuario, cancion):
+        assert client.post(f"/api/usuarios/999/favoritos/{cancion['id']}").status_code == 403
 
     def test_marcar_cancion_inexistente_404(self, client: TestClient, usuario):
         r = client.post(f"/api/usuarios/{usuario['id']}/favoritos/999")
@@ -781,14 +813,25 @@ class TestFavoritosDeUsuario:
         assert r.status_code == 404
         assert r.json()["detail"] == "Favorito no encontrado"
 
-    def test_desmarcar_no_afecta_a_otro_usuario(self, client: TestClient, usuario, otro_usuario, cancion):
-        client.post(f"/api/usuarios/{usuario['id']}/favoritos/{cancion['id']}")
+    def test_desmarcar_de_otro_usuario_403(self, client: TestClient, session: Session, usuario, otro_usuario, cancion, como):
+        como(otro_usuario)
         client.post(f"/api/usuarios/{otro_usuario['id']}/favoritos/{cancion['id']}")
+        como(usuario)
+        r = client.delete(f"/api/usuarios/{otro_usuario['id']}/favoritos/{cancion['id']}")
+        assert r.status_code == 403
+        assert len(session.exec(select(Favorito)).all()) == 1
+
+    def test_desmarcar_no_afecta_a_otro_usuario(self, client: TestClient, usuario, otro_usuario, cancion, como):
+        client.post(f"/api/usuarios/{usuario['id']}/favoritos/{cancion['id']}")
+        como(otro_usuario)
+        client.post(f"/api/usuarios/{otro_usuario['id']}/favoritos/{cancion['id']}")
+        como(usuario)
         client.delete(f"/api/usuarios/{usuario['id']}/favoritos/{cancion['id']}")
+        como(otro_usuario)
         assert len(client.get(f"/api/usuarios/{otro_usuario['id']}/favoritos").json()) == 1
 
     @pytest.mark.parametrize("ruta", ["/api/usuarios/x/favoritos/1", "/api/usuarios/1/favoritos/x"])
-    def test_ids_no_enteros_422(self, client: TestClient, ruta):
+    def test_ids_no_enteros_422(self, client: TestClient, usuario, ruta):
         assert client.post(ruta).status_code == 422
         assert client.delete(ruta).status_code == 422
 
@@ -799,8 +842,9 @@ class TestFavoritosDeUsuario:
 
 
 class TestFlujoCompleto:
-    def test_flujo_crear_marcar_listar_desmarcar(self, client: TestClient, session: Session):
-        u = client.post("/api/usuarios", json={"nombre": "Flujo", "correo": "flujo@test.com"}).json()
+    def test_flujo_crear_marcar_listar_desmarcar(self, client: TestClient, session: Session, como):
+        u = registrar(client, "Flujo", "flujo@test.com")
+        como(u)
         c1 = client.post("/api/canciones", json=cancion_payload(titulo="Uno")).json()
         c2 = client.post("/api/canciones", json=cancion_payload(titulo="Dos")).json()
 

@@ -38,7 +38,13 @@ class Settings(BaseSettings):
     secret_key: str = "clave-de-desarrollo-cambiar-en-produccion"
     algorithm: str = "HS256"
     access_token_expire_minutes: int = 60
-    
+
+    # Cuenta de administrador que se crea al arrancar si no existe.
+    # En producción cambia ADMIN_PASSWORD en el .env (con la de por defecto la API no arranca).
+    admin_nombre: str = "admin"
+    admin_correo: str = "admin@musica.com"
+    admin_password: str = "admin@2026.musica"
+
     # TODO: Configuración de logging
     # log_level: str = "INFO"
     

@@ -46,6 +46,9 @@ class Usuario(SQLModel, table=True):
     # Hash PBKDF2 de la contraseña. exclude=True: nunca se serializa en las respuestas
     # ni entra en model_dump() (por eso un PUT no puede modificarlo).
     password_hash: Optional[str] = Field(default=None, exclude=True)
+    # Rol de administrador: puede ver y gestionar a todos los usuarios y sus favoritos.
+    # Solo se asigna en el servidor (ver app/admin.py); la API nunca lo acepta del cliente.
+    es_admin: bool = Field(default=False)
 
     favoritos: list["Favorito"] = Relationship(back_populates="usuario")
 

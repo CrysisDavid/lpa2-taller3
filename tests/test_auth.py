@@ -5,8 +5,7 @@ from datetime import datetime, timedelta, timezone
 import jwt
 import pytest
 from fastapi.testclient import TestClient
-from sqlmodel import Session, SQLModel, create_engine, select
-from sqlmodel.pool import StaticPool
+from sqlmodel import Session, select
 
 import app.auth as auth
 from app.database import get_session
@@ -17,22 +16,10 @@ from musica_api.config import settings
 REGISTRO = {"nombre": "Ana García", "correo": "Ana@Test.com", "password": "secreta123"}
 
 
-@pytest.fixture(autouse=True)
-def hash_rapido(monkeypatch):
-    # Menos iteraciones solo para que las pruebas sean rápidas.
-    monkeypatch.setattr(auth, "_ITERACIONES", 1_000)
-
-
-@pytest.fixture(name="session")
-def session_fixture():
-    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
-    SQLModel.metadata.create_all(engine)
-    with Session(engine) as session:
-        yield session
-
-
 @pytest.fixture(name="client")
 def client_fixture(session: Session):
+    """Reemplaza el client de conftest.py: aquí se prueban tokens reales."""
+
     def override_get_session():
         yield session
 
@@ -143,7 +130,7 @@ def test_usuario_sin_password_no_puede_iniciar_sesion(client: TestClient, sessio
 def test_me_con_token(client: TestClient, token):
     r = client.get("/api/auth/me", headers=auth_header(token))
     assert r.status_code == 200
-    assert set(r.json()) == {"id", "nombre", "correo", "fecha_registro"}
+    assert set(r.json()) == {"id", "nombre", "correo", "fecha_registro", "es_admin"}
 
 
 @pytest.mark.parametrize(
@@ -183,14 +170,54 @@ def test_respuestas_no_exponen_password_hash(client: TestClient, token):
     assert "password_hash" not in uno
 
 
-def test_crud_no_permite_fijar_password_hash(client: TestClient, session: Session, token):
-    r = client.post(
-        "/api/usuarios",
+def test_crud_no_permite_fijar_password_hash(client: TestClient, token):
+    me = client.get("/api/auth/me", headers=auth_header(token)).json()
+    r = client.put(
+        f"/api/usuarios/{me['id']}",
         headers=auth_header(token),
-        json={"nombre": "Intruso", "correo": "intruso@test.com", "password_hash": "pbkdf2_sha256$1$a$b"},
+        json={"password_hash": "pbkdf2_sha256$1$a$b"},
     )
-    assert r.status_code == 201
-    assert session.get(Usuario, r.json()["id"]).password_hash is None
+    assert r.status_code == 200
+    # la contraseña original sigue funcionando
+    login = client.post("/api/auth/login", json={"correo": "ana@test.com", "password": "secreta123"})
+    assert login.status_code == 200
+
+
+def test_crud_no_permite_crear_usuarios(client: TestClient, token):
+    r = client.post("/api/usuarios", headers=auth_header(token), json={"nombre": "X", "correo": "x@test.com"})
+    assert r.status_code == 403
+
+
+def test_token_de_un_usuario_no_da_acceso_a_otro(client: TestClient, token):
+    luis = client.post(
+        "/api/auth/registro", json={"nombre": "Luis", "correo": "luis@test.com", "password": "secreta123"}
+    ).json()["usuario"]
+    assert client.get(f"/api/usuarios/{luis['id']}", headers=auth_header(token)).status_code == 403
+    assert client.delete(f"/api/usuarios/{luis['id']}", headers=auth_header(token)).status_code == 403
+
+
+def test_token_emitido_antes_del_registro_401(client: TestClient, token):
+    # SQLite reutiliza los id de usuarios borrados: un token antiguo con el mismo
+    # id (de un usuario ya eliminado) no debe dar acceso a la cuenta nueva.
+    me = client.get("/api/auth/me", headers=auth_header(token)).json()
+    ahora = datetime.now(timezone.utc)
+    viejo = jwt.encode(
+        {"sub": str(me["id"]), "iat": ahora - timedelta(hours=1), "exp": ahora + timedelta(minutes=10)},
+        settings.secret_key,
+        algorithm=settings.algorithm,
+    )
+    r = client.get("/api/auth/me", headers=auth_header(viejo))
+    assert r.status_code == 401
+    assert r.json()["detail"] == "Token inválido"
+
+
+def test_token_sin_iat_401(client: TestClient, token):
+    sin_iat = jwt.encode(
+        {"sub": "1", "exp": datetime.now(timezone.utc) + timedelta(minutes=10)},
+        settings.secret_key,
+        algorithm=settings.algorithm,
+    )
+    assert client.get("/api/auth/me", headers=auth_header(sin_iat)).status_code == 401
 
 
 def test_token_invalido_401(client: TestClient):
@@ -206,7 +233,11 @@ def test_token_firmado_con_otra_clave_401(client: TestClient, token):
 
 def test_token_expirado_401(client: TestClient, token):
     pasado = datetime.now(timezone.utc) - timedelta(minutes=5)
-    expirado = jwt.encode({"sub": "1", "exp": pasado}, settings.secret_key, algorithm=settings.algorithm)
+    expirado = jwt.encode(
+        {"sub": "1", "iat": pasado - timedelta(hours=1), "exp": pasado},
+        settings.secret_key,
+        algorithm=settings.algorithm,
+    )
     r = client.get("/api/canciones", headers=auth_header(expirado))
     assert r.status_code == 401
     assert "expiró" in r.json()["detail"]

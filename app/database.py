@@ -18,11 +18,19 @@ def _migrar_columnas() -> None:
     if "password_hash" not in columnas:
         with engine.begin() as conn:
             conn.execute(text("ALTER TABLE usuarios ADD COLUMN password_hash VARCHAR"))
+    if "es_admin" not in columnas:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE usuarios ADD COLUMN es_admin BOOLEAN NOT NULL DEFAULT 0"))
 
 
 def create_db_and_tables() -> None:
     SQLModel.metadata.create_all(engine)
     _migrar_columnas()
+    # Importación diferida: app.admin usa app.auth, que a su vez importa este módulo.
+    from app.admin import asegurar_admin
+
+    with Session(engine) as session:
+        asegurar_admin(session)
 
 
 def get_session() -> Generator[Session, None, None]:

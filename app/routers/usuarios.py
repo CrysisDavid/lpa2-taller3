@@ -1,44 +1,46 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
-from app.auth import get_usuario_actual
+from app.auth import exigir_mismo_usuario, get_usuario_actual
 from app.database import get_session
 from app.models import Cancion, Favorito, Usuario
 
-# Todas las rutas exigen un token JWT válido (Authorization: Bearer <token>)
+# Todas las rutas exigen un token JWT válido (Authorization: Bearer <token>) y cada
+# usuario solo puede leer y modificar su propio registro y sus propios favoritos.
+# El administrador (es_admin) puede ver y gestionar a todos los usuarios.
 router = APIRouter(prefix="/api/usuarios", tags=["Usuarios"], dependencies=[Depends(get_usuario_actual)])
 
 
 @router.get("")
-def listar_usuarios(session: Session = Depends(get_session)):
-    return session.exec(select(Usuario)).all()
+def listar_usuarios(
+    session: Session = Depends(get_session),
+    actual: Usuario = Depends(get_usuario_actual),
+):
+    """El administrador ve a todos los usuarios; los demás, solo a sí mismos."""
+    if actual.es_admin:
+        return session.exec(select(Usuario).order_by(Usuario.id)).all()
+    return [actual]
 
 
-@router.post("", status_code=status.HTTP_201_CREATED)
-def crear_usuario(usuario: Usuario, session: Session = Depends(get_session)):
-    usuario.id = None
-    usuario.password_hash = None  # la contraseña solo se define en /api/auth/registro
-    usuario.fecha_registro = usuario.fecha_registro or datetime.now(timezone.utc)
-    try:
-        session.add(usuario)
-        session.commit()
-        session.refresh(usuario)
-        return usuario
-    except IntegrityError:
-        session.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Ya existe un usuario con ese correo",
-        ) from None
+@router.post("", status_code=status.HTTP_403_FORBIDDEN)
+def crear_usuario():
+    """Las cuentas se crean con POST /api/auth/registro (cada usuario crea la suya)."""
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Los usuarios se crean registrándose en /api/auth/registro",
+    )
 
 
 @router.get("/{usuario_id}")
-def obtener_usuario(usuario_id: int, session: Session = Depends(get_session)):
+def obtener_usuario(
+    usuario_id: int,
+    session: Session = Depends(get_session),
+    actual: Usuario = Depends(get_usuario_actual),
+):
+    exigir_mismo_usuario(usuario_id, actual)
     usuario = session.get(Usuario, usuario_id)
     if not usuario:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado")
@@ -46,14 +48,21 @@ def obtener_usuario(usuario_id: int, session: Session = Depends(get_session)):
 
 
 @router.put("/{usuario_id}")
-def actualizar_usuario(usuario_id: int, usuario: Usuario, session: Session = Depends(get_session)):
+def actualizar_usuario(
+    usuario_id: int,
+    usuario: Usuario,
+    session: Session = Depends(get_session),
+    actual: Usuario = Depends(get_usuario_actual),
+):
+    exigir_mismo_usuario(usuario_id, actual)
     db_usuario = session.get(Usuario, usuario_id)
     if not db_usuario:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado")
 
     data = usuario.model_dump(exclude_unset=True)
     for campo, valor in data.items():
-        if campo == "id":
+        # El id no se cambia y el rol de administrador nunca se acepta del cliente.
+        if campo in ("id", "es_admin"):
             continue
         setattr(db_usuario, campo, valor)
 
@@ -71,18 +80,37 @@ def actualizar_usuario(usuario_id: int, usuario: Usuario, session: Session = Dep
 
 
 @router.delete("/{usuario_id}", status_code=status.HTTP_204_NO_CONTENT)
-def eliminar_usuario(usuario_id: int, session: Session = Depends(get_session)):
+def eliminar_usuario(
+    usuario_id: int,
+    session: Session = Depends(get_session),
+    actual: Usuario = Depends(get_usuario_actual),
+):
+    exigir_mismo_usuario(usuario_id, actual)
     usuario = session.get(Usuario, usuario_id)
     if not usuario:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado")
+    if usuario.es_admin:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="La cuenta de administrador no se puede eliminar",
+        )
 
+    # Al eliminar la cuenta se eliminan también sus favoritos (si no, SQLAlchemy
+    # intentaría poner id_usuario=NULL en ellos y la base de datos lo rechaza).
+    for favorito in session.exec(select(Favorito).where(Favorito.id_usuario == usuario_id)).all():
+        session.delete(favorito)
     session.delete(usuario)
     session.commit()
     return None
 
 
 @router.get("/{usuario_id}/favoritos")
-def listar_favoritos_usuario(usuario_id: int, session: Session = Depends(get_session)):
+def listar_favoritos_usuario(
+    usuario_id: int,
+    session: Session = Depends(get_session),
+    actual: Usuario = Depends(get_usuario_actual),
+):
+    exigir_mismo_usuario(usuario_id, actual)
     usuario = session.get(Usuario, usuario_id)
     if not usuario:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado")
@@ -92,7 +120,13 @@ def listar_favoritos_usuario(usuario_id: int, session: Session = Depends(get_ses
 
 
 @router.post("/{usuario_id}/favoritos/{cancion_id}", status_code=status.HTTP_201_CREATED)
-def marcar_favorito_usuario(usuario_id: int, cancion_id: int, session: Session = Depends(get_session)):
+def marcar_favorito_usuario(
+    usuario_id: int,
+    cancion_id: int,
+    session: Session = Depends(get_session),
+    actual: Usuario = Depends(get_usuario_actual),
+):
+    exigir_mismo_usuario(usuario_id, actual)
     usuario = session.get(Usuario, usuario_id)
     if not usuario:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado")
@@ -119,7 +153,13 @@ def marcar_favorito_usuario(usuario_id: int, cancion_id: int, session: Session =
 
 
 @router.delete("/{usuario_id}/favoritos/{cancion_id}", status_code=status.HTTP_204_NO_CONTENT)
-def eliminar_favorito_usuario(usuario_id: int, cancion_id: int, session: Session = Depends(get_session)):
+def eliminar_favorito_usuario(
+    usuario_id: int,
+    cancion_id: int,
+    session: Session = Depends(get_session),
+    actual: Usuario = Depends(get_usuario_actual),
+):
+    exigir_mismo_usuario(usuario_id, actual)
     favorito = session.exec(
         select(Favorito).where(Favorito.id_usuario == usuario_id, Favorito.id_cancion == cancion_id)
     ).first()

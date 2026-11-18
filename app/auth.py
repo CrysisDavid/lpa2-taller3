@@ -75,14 +75,40 @@ def get_usuario_actual(
     if credenciales is None:
         raise _no_autorizado("No autenticado")
     try:
-        payload = jwt.decode(credenciales.credentials, settings.secret_key, algorithms=[settings.algorithm])
+        payload = jwt.decode(
+            credenciales.credentials,
+            settings.secret_key,
+            algorithms=[settings.algorithm],
+            options={"require": ["sub", "iat", "exp"]},
+        )
         usuario_id = int(payload["sub"])
+        emitido = int(payload["iat"])
     except jwt.ExpiredSignatureError:
         raise _no_autorizado("La sesión expiró, inicia sesión de nuevo") from None
-    except (jwt.InvalidTokenError, KeyError, ValueError):
+    except (jwt.InvalidTokenError, KeyError, ValueError, TypeError):
         raise _no_autorizado("Token inválido") from None
 
     usuario = session.get(Usuario, usuario_id)
-    if not usuario:
+    # SQLite reutiliza los id de filas borradas: un token emitido antes de que se
+    # creara esta cuenta pertenece a otro usuario (ya eliminado) y se rechaza.
+    if not usuario or emitido < _segundos(usuario.fecha_registro):
         raise _no_autorizado("Token inválido")
     return usuario
+
+
+def _segundos(fecha: datetime) -> int:
+    if fecha.tzinfo is None:  # SQLite devuelve fechas sin zona horaria (guardadas en UTC)
+        fecha = fecha.replace(tzinfo=timezone.utc)
+    return int(fecha.timestamp())
+
+
+def exigir_mismo_usuario(usuario_id: int, actual: Usuario) -> None:
+    """Autorización: cada usuario solo puede leer y modificar sus propios datos.
+
+    El administrador puede acceder a los datos de cualquier usuario.
+    """
+    if usuario_id != actual.id and not actual.es_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No tienes permiso para acceder a los datos de otro usuario",
+        )

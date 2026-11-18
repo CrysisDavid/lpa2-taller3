@@ -2,50 +2,21 @@
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlmodel import Session, SQLModel, create_engine, select
-from sqlmodel.pool import StaticPool
+from sqlmodel import Session
 
-from app.auth import get_usuario_actual
-from app.database import get_session
 from app.models import Cancion, Favorito, Usuario
-from main import app
 
-
-def override_usuario_actual():
-    """Simula un usuario autenticado: la autenticación se prueba en test_auth.py."""
-    return Usuario(id=0, nombre="Tester", correo="tester@test.com")
-
-
-@pytest.fixture(name="session")
-def session_fixture():
-    engine = create_engine(
-        "sqlite://",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    SQLModel.metadata.create_all(engine)
-    with Session(engine) as session:
-        yield session
-
-
-@pytest.fixture(name="client")
-def client_fixture(session: Session):
-    def override_get_session():
-        yield session
-
-    app.dependency_overrides[get_session] = override_get_session
-    app.dependency_overrides[get_usuario_actual] = override_usuario_actual
-    with TestClient(app) as client:
-        yield client
-    app.dependency_overrides.clear()
+# Las fixtures session, client y como están en tests/conftest.py.
 
 
 @pytest.fixture(name="usuario_test")
-def usuario_test_fixture(session: Session):
+def usuario_test_fixture(session: Session, como):
+    """Usuario guardado en la base de datos y autenticado en la prueba."""
     usuario = Usuario(nombre="Ana García", correo="ana@test.com")
     session.add(usuario)
     session.commit()
     session.refresh(usuario)
+    como(usuario)
     return usuario
 
 
@@ -66,32 +37,28 @@ def cancion_test_fixture(session: Session):
 
 
 class TestUsuarios:
-    def test_listar_usuarios(self, client: TestClient):
+    def test_listar_usuarios_solo_el_propio(self, client: TestClient, usuario_test: Usuario):
         response = client.get("/api/usuarios")
         assert response.status_code == 200
-        assert isinstance(response.json(), list)
+        assert [u["id"] for u in response.json()] == [usuario_test.id]
 
-    def test_crear_usuario_con_fecha_iso(self, client: TestClient):
-        payload = {
-            "nombre": "Cristian Solis",
-            "correo": "davidcristian@gmail.com",
-            "fecha_registro": "2026-11-17T21:18:00.119Z",
-        }
-        response = client.post("/api/usuarios", json=payload)
+    def test_crear_usuario_por_registro(self, client: TestClient):
+        payload = {"nombre": "Carlos", "correo": "carlos@test.com", "password": "secreta123"}
+        response = client.post("/api/auth/registro", json=payload)
         assert response.status_code == 201
-        assert isinstance(response.json()["fecha_registro"], str)
-
-    def test_crear_usuario(self, client: TestClient):
-        payload = {"nombre": "Carlos", "correo": "carlos@test.com"}
-        response = client.post("/api/usuarios", json=payload)
-        assert response.status_code == 201
-        data = response.json()
+        data = response.json()["usuario"]
         assert data["nombre"] == "Carlos"
         assert data["correo"] == "carlos@test.com"
+        assert isinstance(data["fecha_registro"], str)
+
+    def test_crear_usuario_por_crud_prohibido(self, client: TestClient, usuario_test: Usuario):
+        payload = {"nombre": "Carlos", "correo": "carlos@test.com", "fecha_registro": "2026-11-17T21:18:00.119Z"}
+        response = client.post("/api/usuarios", json=payload)
+        assert response.status_code == 403
 
     def test_crear_usuario_correo_duplicado(self, client: TestClient, usuario_test: Usuario):
-        payload = {"nombre": "Ana Duplicada", "correo": usuario_test.correo}
-        response = client.post("/api/usuarios", json=payload)
+        payload = {"nombre": "Ana Duplicada", "correo": usuario_test.correo, "password": "secreta123"}
+        response = client.post("/api/auth/registro", json=payload)
         assert response.status_code == 400
 
     def test_obtener_usuario(self, client: TestClient, usuario_test: Usuario):
@@ -99,9 +66,9 @@ class TestUsuarios:
         assert response.status_code == 200
         assert response.json()["nombre"] == usuario_test.nombre
 
-    def test_obtener_usuario_no_existe(self, client: TestClient):
+    def test_obtener_otro_usuario_prohibido(self, client: TestClient, usuario_test: Usuario):
         response = client.get("/api/usuarios/999")
-        assert response.status_code == 404
+        assert response.status_code == 403
 
     def test_actualizar_usuario(self, client: TestClient, usuario_test: Usuario):
         payload = {"nombre": "Ana Actualizada", "correo": "ana_nueva@test.com"}
@@ -111,10 +78,13 @@ class TestUsuarios:
         assert data["nombre"] == "Ana Actualizada"
         assert data["correo"] == "ana_nueva@test.com"
 
-    def test_eliminar_usuario(self, client: TestClient, usuario_test: Usuario):
-        response = client.delete(f"/api/usuarios/{usuario_test.id}")
+    def test_eliminar_usuario(self, client: TestClient, session: Session, usuario_test: Usuario):
+        usuario_id = usuario_test.id
+        response = client.delete(f"/api/usuarios/{usuario_id}")
         assert response.status_code == 204
-        assert client.get(f"/api/usuarios/{usuario_test.id}").status_code == 404
+        assert session.get(Usuario, usuario_id) is None
+        # la sesión del usuario eliminado deja de ser válida
+        assert client.get(f"/api/usuarios/{usuario_id}").status_code == 401
 
 
 class TestCanciones:
@@ -180,7 +150,7 @@ class TestCanciones:
 
 
 class TestFavoritos:
-    def test_listar_favoritos(self, client: TestClient):
+    def test_listar_favoritos(self, client: TestClient, usuario_test: Usuario):
         response = client.get("/api/favoritos")
         assert response.status_code == 200
         assert isinstance(response.json(), list)

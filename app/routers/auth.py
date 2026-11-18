@@ -59,6 +59,7 @@ class UsuarioPublico(BaseModel):
     nombre: str
     correo: str
     fecha_registro: datetime
+    es_admin: bool = False
 
 
 class Token(BaseModel):

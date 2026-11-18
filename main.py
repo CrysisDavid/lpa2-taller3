@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.admin import ADMIN_PASSWORD_POR_DEFECTO
 from app.database import create_db_and_tables
 from app.routers import auth_router, canciones_router, favoritos_router, peliculas_router, usuarios_router
 from musica_api.config import settings
@@ -13,9 +14,12 @@ CLAVE_DESARROLLO = "clave-de-desarrollo-cambiar-en-produccion"
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Crea tablas al iniciar y limpia al terminar."""
-    if settings.environment.lower() == "production" and settings.secret_key == CLAVE_DESARROLLO:
-        raise RuntimeError("Define SECRET_KEY en el .env antes de ejecutar en producción")
-    create_db_and_tables()
+    if settings.environment.lower() == "production":
+        if settings.secret_key == CLAVE_DESARROLLO:
+            raise RuntimeError("Define SECRET_KEY en el .env antes de ejecutar en producción")
+        if settings.admin_password == ADMIN_PASSWORD_POR_DEFECTO:
+            raise RuntimeError("Define ADMIN_PASSWORD en el .env antes de ejecutar en producción")
+    create_db_and_tables()  # también crea la cuenta de administrador si no existe
     yield
     print("cerrando aplicación...")
 
