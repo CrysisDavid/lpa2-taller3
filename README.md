@@ -92,6 +92,22 @@ lpa2-taller3
 
 ## Uso de la API
 
+### Autenticación (JWT)
+
+Todas las rutas de `/api/usuarios`, `/api/canciones` y `/api/favoritos` requieren un token JWT en la cabecera `Authorization: Bearer <token>`; sin él responden `401`. Las rutas `/` y `/health` son públicas.
+
+- **Registrarse**: `POST /api/auth/registro` con `{"nombre", "correo", "password"}` (mínimo 8 caracteres). Responde `201` con un token: queda la sesión iniciada.
+- **Iniciar sesión**: `POST /api/auth/login` con `{"correo", "password"}`. Responde `{"access_token", "token_type": "bearer", "expires_in", "usuario"}` o `401` si las credenciales no son correctas.
+- **Usuario actual**: `GET /api/auth/me`
+
+Notas:
+
+- En *Swagger UI* (`/docs`) usa el botón **Authorize** y pega el `access_token`.
+- El token expira a los 60 minutos (`ACCESS_TOKEN_EXPIRE_MINUTES`).
+- En producción define `SECRET_KEY` en el `.env`; con la clave de desarrollo la API no arranca si `ENVIRONMENT=production`. Para generar una: `python -c "import secrets; print(secrets.token_urlsafe(48))"`.
+- Las contraseñas se guardan con hash PBKDF2-SHA256 y nunca se devuelven en las respuestas. Los usuarios creados con `POST /api/usuarios` (o directamente en la base de datos) no tienen contraseña y no pueden iniciar sesión.
+- Al arrancar, la API agrega la columna `password_hash` a una base de datos existente.
+
 ### Usuarios
 
 - **Listar usuarios**: `GET /api/usuarios`
